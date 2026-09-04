@@ -18,6 +18,7 @@ import datetime
 import os
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 from bs4 import BeautifulSoup
@@ -140,6 +141,49 @@ def parse_media_page(html: str):
     return items
 
 
+def fetch_article_summary(url: str, max_len: int = 90) -> str:
+    """抓取华农官网文章详情页正文首段作为摘要
+    适用校内栏目：学校要闻 / 科研进展 / 综合新闻（部分列表页无 news_text 摘要）"""
+    try:
+        r = requests.get(url, headers=UA, timeout=12)
+        r.encoding = "utf-8"
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
+        # 博达 CMS 正文容器：优先 .wp_articlecontent（科研进展）→ .article（学校要闻）→ .v_news_content
+        for sel in [".wp_articlecontent p", ".article p", ".v_news_content p",
+                    ".entry_con p", ".wp_articlecontent", ".article"]:
+            el = soup.select_one(sel)
+            if el:
+                text = el.get_text(" ", strip=True)
+                # 过滤元信息行：来源/编辑/审核/发布时间等
+                for skip in ["来源单位", "编辑：", "审核发布", "发布时间", "供稿", "本网讯"]:
+                    if skip in text[:60]:
+                        text = text[text.find(skip) + len(skip):].lstrip("：:、 ")
+                text = re.sub(r"\s+", " ", text).strip()
+                if len(text) > 30:
+                    return text[:max_len] + ("…" if len(text) > max_len else "")
+        return ""
+    except Exception as e:
+        print(f"[warn] 详情页抓取失败 {url}: {e}", file=sys.stderr)
+        return ""
+
+
+def enrich_summaries(items, only_missing=True):
+    """为没有摘要的校内文章并发抓取详情页首段。媒体聚焦不抓（外站不稳定）"""
+    targets = [it for it in items
+               if (not only_missing or not it.get("summary"))
+               and it["column"] != "媒体聚焦"
+               and "scau.edu.cn" in it["url"]]
+    if not targets:
+        return items
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        results = list(ex.map(lambda it: (it, fetch_article_summary(it["url"])), targets))
+    for it, sm in results:
+        if sm:
+            it["summary"] = sm
+    return items
+
+
 def fetch_all():
     """抓取全部数据源，去重合并"""
     merged, seen_titles = [], set()
@@ -158,6 +202,8 @@ def fetch_all():
                 continue
             seen_titles.add(key)
             merged.append(it)
+    # 详情页补全摘要（学校要闻列表页没 news_text / 科研进展 / 部分综合新闻）
+    enrich_summaries(merged, only_missing=True)
     return merged
 
 
@@ -198,9 +244,10 @@ def build_markdown(top):
     medal = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣"]
     for i, it in enumerate(top):
         lines.append(f"**{medal[i] if i < len(medal) else i+1} [{it['column']}] {it['title']}**")
-        lines.append(f"📅 {it['date']}  [阅读原文]({it['url']})")
-        if it["summary"]:
-            lines.append(f"> {it['summary']}…")
+        lines.append(f"📅 {it['date']}  [👉 阅读原文]({it['url']})")
+        if it.get("summary"):
+            # 用引用块让摘要更醒目
+            lines.append(f"> 📝 **摘要**：{it['summary']}")
         lines.append("")
     lines.append(f"*数据来源：[华南农业大学官网]({BASE}) · 自动抓取*")
     return "\n".join(lines)
