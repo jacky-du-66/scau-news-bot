@@ -1,0 +1,27 @@
+name: 华农热点推送
+
+on:
+  schedule:
+    # 北京时间早 10:00（GitHub 容器使用 UTC，2:00 = CST 10:00）
+    # 想要晚 8:00 再推一次，取消下一行注释
+    - cron: '0 2 * * *'
+    # - cron: '0 12 * * *'   # 北京时间晚 20:00
+  workflow_dispatch:  # 支持在仓库 Actions 页面手动触发
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装依赖
+        run: pip3 install requests beautifulsoup4 markdown
+
+      - name: 抓取华农热点并推送微信
+        env:
+          SERVERCHAN_SENDKEY: ${{ secrets.SERVERCHAN_SENDKEY }}
+        run: python3 scau_news.py
